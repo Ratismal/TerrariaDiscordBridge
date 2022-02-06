@@ -8,7 +8,7 @@ using Terraria.ModLoader.Config;
 
 namespace DiscordBridge
 {
-    class DiscordBridgeConfig : ModConfig
+    public class DiscordBridgeConfig : ModConfig
     {
         public override ConfigScope Mode => ConfigScope.ServerSide;
 

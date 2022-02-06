@@ -1,3 +1,4 @@
 displayName = Discord Bridge
 author = stupid cat
 version = 0.1
+side = Server
