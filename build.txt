@@ -2,3 +2,6 @@ displayName = Discord Bridge
 author = stupid cat
 version = 0.1
 side = Server
+buildIgnore = .gitignore, *.sln, *.csproj, *.user, obj\*, bin\*, .vs\*, Properties\*, .git\*
+includePDB = true
+dllReferences = websocket-sharp

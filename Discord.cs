@@ -1,6 +1,9 @@
 ﻿using System;
+using System.IO;
 using System.Linq;
-using System.Net.WebSockets;
+using System.Net;
+using System.Net.Security;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -11,8 +14,7 @@ using Newtonsoft.Json.Linq;
 using Terraria;
 using Terraria.ID;
 using Terraria.Localization;
-using System.Net.Http;
-using System.Net.Http.Headers;
+using WebSocketSharp;
 
 namespace DiscordBridge
 {
@@ -20,16 +22,15 @@ namespace DiscordBridge
     {
         private DiscordBridge mod;
 
-        private readonly Uri DISCORD_URI = new Uri("wss://gateway.discord.gg/?v=9&encoding=json");
-        private ClientWebSocket _client;
+        private readonly string DISCORD_URI = "wss://gateway.discord.gg/?v=9&encoding=json";
+        private WebSocket _client;
         private CancellationTokenSource _cts;
 
         private string _sessionId;
         private int _sequence = 0;
+        private int _interval;
 
         private bool _started = false;
-
-        private static HttpClient _restClient = new HttpClient();
 
         private readonly string BASE_ENDPOINT = "https://discord.com/api/v9";
 
@@ -49,19 +50,46 @@ namespace DiscordBridge
             }
 
             _started = true;
-            _client = new ClientWebSocket();
+            _client = new WebSocket(DISCORD_URI);
             _cts = new CancellationTokenSource();
 
-            _restClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bot", mod.config.token);
+            try
+            {
+                _client.ConnectAsync();
+                _client.EmitOnPing = true;
+                _client.OnMessage += ClientOnOnMessage;
+                _client.OnError += (sender, args) =>
+                {
+                    mod.Logger.Error(args.Message);
+                };
+                _client.OnClose += (sender, args) =>
+                {
+                    _started = false;
+                    mod.Logger.Info("WebSocket closed: " + args.Code + " " + args.Reason);
+                };
 
-            await _client.ConnectAsync(DISCORD_URI, _cts.Token);
+                mod.Logger.Info("Connection established");
+            }
+            catch (Exception e)
+            {
+                mod.Logger.Debug(e.Message);
+                mod.Logger.Debug(e.StackTrace);
+            }
+        }
 
-            await Task.Factory.StartNew(ReceiveMessage, _cts.Token, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+        private void ClientOnOnMessage(object sender, MessageEventArgs e)
+        {
+            var msg = JsonConvert.DeserializeObject<JObject>(e.Data);
+            if (msg != null)
+            {
+                HandleMessage(msg);
+            }
         }
 
         private async Task CloseWebSocket()
         {
-            await _client.CloseAsync(WebSocketCloseStatus.NormalClosure, string.Empty, _cts.Token);
+            _client.CloseAsync();
+            // await _client.CloseAsync(WebSocketCloseStatus.NormalClosure, string.Empty, _cts.Token);
         }
 
         public async Task StopDiscord()
@@ -71,33 +99,18 @@ namespace DiscordBridge
             _sessionId = null;
         }
 
-        private async Task ReceiveMessage()
+        public async Task HeartBeat()
         {
-            mod.Logger.Info("Starting message receiver...");
-            var rcvBytes = new byte[128];
-            var rcvBuffer = new ArraySegment<byte>(rcvBytes);
-
-            string receivedMessage = "";
             while (true)
             {
-                WebSocketReceiveResult rcvResult = await _client.ReceiveAsync(rcvBuffer, _cts.Token);
-                // mod.Logger.Debug("Received a message!");
+                await Task.Delay(_interval);
 
-                byte[] msgBytes = rcvBuffer.Skip(rcvBuffer.Offset).Take(rcvResult.Count).ToArray();
-                string rcvMsg = Encoding.UTF8.GetString(msgBytes);
-                receivedMessage += rcvMsg;
-
-                if (rcvResult.EndOfMessage)
+                if (!_started)
                 {
-                    var msg = JsonConvert.DeserializeObject<JObject>(receivedMessage);
-                    if (msg != null)
-                    {
-                        // mod.Logger.Debug(receivedMessage);
-                        receivedMessage = "";
-
-                        HandleMessage(msg);
-                    }
+                    return;
                 }
+
+                await Ack();
             }
         }
 
@@ -131,9 +144,10 @@ namespace DiscordBridge
                     {
                         await Identify();
                     }
-                    break;
-                case 1: // Heartbeat
-                    await Ack();
+
+                    _interval = data.GetValue("heartbeat_interval").Value<int>();
+
+                    Task.Factory.StartNew(HeartBeat, TaskCreationOptions.LongRunning);
                     break;
                 case 9: // Invalid Session
                     mod.Logger.Info("Invalid session, reconnecting");
@@ -162,9 +176,7 @@ namespace DiscordBridge
 
         private async Task Send(string jsonMessage)
         {
-            var sendBytes = Encoding.UTF8.GetBytes(jsonMessage);
-            var sendBuffer = new ArraySegment<byte>(sendBytes);
-            await _client.SendAsync(sendBuffer, WebSocketMessageType.Text, endOfMessage: true, cancellationToken: _cts.Token);
+            _client.Send(jsonMessage);
         }
 
         private async Task Send(JObject obj)
@@ -175,7 +187,8 @@ namespace DiscordBridge
         private async Task Ack()
         {
             var payload = new JObject();
-            payload.Add("op", 11);
+            payload.Add("op", 1);
+            payload.Add("d", _sequence);
 
             await Send(payload);
         }
@@ -251,15 +264,30 @@ namespace DiscordBridge
             var payload = new JObject();
             payload.Add("content", message);
 
-            StringContent str = new StringContent(JsonConvert.SerializeObject(payload));
-            str.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+            var request = WebRequest.CreateHttp(url);
+            request.Headers.Add("Authorization", "Bot " + mod.config.token);
+            request.Method = "POST";
 
-            var response = await _restClient.PostAsync(url, str);
+            var data = Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(payload));
+            request.ContentType = "application/json";
+            request.ContentLength = data.Length;
 
-            // response.EnsureSuccessStatusCode();
-            string body = await response.Content.ReadAsStringAsync();
+            try
+            {
+                using (var stream = request.GetRequestStream())
+                {
+                    stream.Write(data, 0, data.Length);
+                }
 
-            // mod.Logger.Debug(response.IsSuccessStatusCode + " " + body);
+                var response = (HttpWebResponse) request.GetResponse();
+
+                var responseString = new StreamReader(response.GetResponseStream()).ReadToEnd();
+            }
+            catch (Exception e)
+            {
+                mod.Logger.Debug(e.Message);
+                mod.Logger.Debug(e.StackTrace);
+            }
         }
     }
 }

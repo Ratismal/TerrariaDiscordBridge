@@ -12,12 +12,9 @@ using Terraria.Localization;
 using NetMessage = On.Terraria.NetMessage;
 using NetTextModule = On.Terraria.GameContent.NetModules.NetTextModule;
 
-// using Discord;
-// using Discord.WebSocket;
-
 namespace DiscordBridge
 {
-	public class DiscordBridge : Mod
+    public class DiscordBridge : Mod
     {
         private Discord discord;
         public DiscordBridgeConfig config;
