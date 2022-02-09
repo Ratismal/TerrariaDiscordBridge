@@ -41,7 +41,7 @@ namespace DiscordBridge
             this.mod = mod;
         }
 
-        public async Task StartDiscord()
+        public void StartDiscord()
         {
             mod.Logger.Info("Starting Discord Connection");
             if (_started)
@@ -64,7 +64,14 @@ namespace DiscordBridge
                 };
                 _client.OnClose += (sender, args) =>
                 {
-                    _started = false;
+                    if (_started) {
+                        _started = false;
+                        StartDiscord();
+                    } 
+                    else
+                    {
+                        _started = false;
+                    }
                     mod.Logger.Info("WebSocket closed: " + args.Code + " " + args.Reason);
                 };
 
@@ -88,8 +95,8 @@ namespace DiscordBridge
 
         private async Task CloseWebSocket()
         {
-            _client.CloseAsync();
-            // await _client.CloseAsync(WebSocketCloseStatus.NormalClosure, string.Empty, _cts.Token);
+            _started = false;
+            _client.Close();
         }
 
         public async Task StopDiscord()
@@ -152,12 +159,12 @@ namespace DiscordBridge
                 case 9: // Invalid Session
                     mod.Logger.Info("Invalid session, reconnecting");
                     await CloseWebSocket();
-                    await StartDiscord();
+                    StartDiscord();
                     break;
                 case 7: // Reconnect
                     mod.Logger.Info("Reconnecting");
                     await CloseWebSocket();
-                    await StartDiscord();
+                    StartDiscord();
                     break;
                 case 0: // Dispatch
                     string t = msg.GetValue("t").Value<string>();
@@ -244,6 +251,14 @@ namespace DiscordBridge
             var msg = data.ToObject<Message>();
             if (msg.channel_id == mod.config.channelId && msg.content != null && msg.author.id != BotUser.id)
             {
+                if (!msg.author.bot && msg.content.StartsWith("!"))
+                {
+                    var words = msg.content.Substring(1).ToLower().Split(' ');
+                    if (words[0] == "ping")
+                    {
+                        await SendMessage(msg.channel_id, "Pong!");
+                    }
+                }
                 var text = msg.author.username + ">> " + msg.content;
                 if (Main.netMode != NetmodeID.Server)
                 {

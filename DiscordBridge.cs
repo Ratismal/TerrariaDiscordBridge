@@ -62,6 +62,7 @@ namespace DiscordBridge
 
         public override void Unload()
         {
+            discord.SendMessage(config.channelId, "Stopping server...");
             Task.Factory.StartNew(discord.StopDiscord);
             On.Terraria.NetMessage.BroadcastChatMessage -= NetMessageOnBroadcastChatMessage;
             On.Terraria.GameContent.NetModules.NetTextModule.DeserializeAsServer -= NetTextModuleOnDeserializeAsServer;
