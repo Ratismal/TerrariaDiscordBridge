@@ -1,10 +1,12 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Security;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using DiscordBridge.Structs;
@@ -14,6 +16,9 @@ using Newtonsoft.Json.Linq;
 using Terraria;
 using Terraria.ID;
 using Terraria.Localization;
+using Terraria.ModLoader;
+using Terraria.ModLoader.IO;
+using Terraria.UI.Chat;
 using WebSocketSharp;
 
 namespace DiscordBridge
@@ -31,6 +36,7 @@ namespace DiscordBridge
         private int _interval;
 
         private bool _started = false;
+        private bool _heartbeatStarted = false;
 
         private readonly string BASE_ENDPOINT = "https://discord.com/api/v9";
 
@@ -108,17 +114,22 @@ namespace DiscordBridge
 
         public async Task HeartBeat()
         {
+            if (_heartbeatStarted) {
+                return;
+            }
+            _heartbeatStarted = true;
             while (true)
             {
                 await Task.Delay(_interval);
 
                 if (!_started)
                 {
-                    return;
+                    break;
                 }
 
                 await Ack();
             }
+            _heartbeatStarted = false;
         }
 
         private async Task HandleMessage(JObject msg)
@@ -272,19 +283,182 @@ namespace DiscordBridge
             }
         }
 
+        public Item ParseItem(string text, string options)
+        {
+            Item item = new Item();
+            int result;
+            if (int.TryParse(text, out result) && result < ItemLoader.ItemCount)
+            {
+                item.netDefaults(result);
+            }
+            if (item.type <= 0)
+            {
+                return null;
+            }
+            item.stack = 1;
+            if (options != null)
+            {
+                string[] array = options.Split(new char[]
+                {
+                    ','
+                });
+                for (int i = 0; i < array.Length; i++)
+                {
+                    if (array[i].Length != 0)
+                    {
+                        char c = array[i][0];
+                        if (c <= 'p')
+                        {
+                            if (c != 'd')
+                            {
+                                if (c == 'p')
+                                {
+                                    int result2;
+                                    if (int.TryParse(array[i].Substring(1), out result2))
+                                    {
+                                        item.Prefix((int) ((byte) Utils.Clamp<int>(result2, 0,
+                                            (int) ModPrefix.PrefixCount)));
+                                    }
+                                }
+                            }
+                            else
+                            {
+                                item = ItemIO.FromBase64(array[i].Substring(1));
+                            }
+                        }
+                        else if (c == 's' || c == 'x')
+                        {
+                            int result3;
+                            if (int.TryParse(array[i].Substring(1), out result3))
+                            {
+                                item.stack = Utils.Clamp<int>(result3, 1, item.maxStack);
+                            }
+                        }
+                    }
+                }
+            }
+
+            return item;
+        }
+
+        public string ParseMessage(string message, string boundary)
+        {
+            var payload = new JObject();
+
+            List<string> attachments = new List<string>();
+            var form = new StringBuilder();
+
+            // [i/dH4sIAC5OBWIA/+NiYOBgYM7NT2HgCEktKkosykxkZmDKTGFg4OllAADuEVe2HQAAAA==:3213]
+            var regex = ChatManager.Regexes.Format;
+            var matches = regex.Matches(message);
+            List<Item> items = new List<Item>();
+            message = regex.Replace(message, match =>
+            {
+                if (match.Groups["tag"].Value == "i" || match.Groups["tag"].Value == "item")
+                {
+                    var item = ParseItem(match.Groups["text"].Value, match.Groups["options"].Value);
+                    string output = item.Name;
+                    if (item.maxStack == 1)
+                    {
+                        if (item.AffixName() != null)
+                        {
+                            output = item.AffixName();
+                        }
+                    }
+                    else
+                    {
+                        output = item.Name + " (" + item.stack + ")";
+                    }
+                    items.Add(item);
+                    return "[" + output + "]";
+                }
+
+                if (match.Groups["tag"].Value == "c" || match.Groups["tag"].Value == "color")
+                {
+                    return match.Groups["text"].Value;
+                }
+
+                return match.Value;
+            });
+
+            /*
+            if (items.Count > 0)
+            {
+                List<JObject> embeds = new List<JObject>();
+
+                foreach (var item in items)
+                {
+                    var embed = new JObject();
+                    embed.Add("title", item.AffixName());
+                    string desc = "";
+                    for (int i = 0; i < item.ToolTip.Lines; i++)
+                    {
+                        desc += item.ToolTip.GetLine(i) + "\n";
+                    }
+
+                    try
+                    {
+                        var texture = Main.itemTexture[item.type];
+                        MemoryStream stream = new MemoryStream();
+                        texture.SaveAsPng(stream, item.getRect().Width, item.getRect().Width);
+                        // item.
+                        embed.Add("description", desc);
+
+
+                        var filename = "item-" + item.type + ".png";
+
+                        form.Append("--" + boundary + "\r\n");
+                        form.Append("Content-Disposition: form-data; name=\"file[");
+                        form.Append(attachments.Count);
+                        form.Append("]\"; ");
+                        form.Append("filename=\"");
+                        form.Append(filename);
+                        form.Append("\"\r\n");
+                        form.Append("Content-Type: image/png\r\n\r\n");
+                        form.Append(Convert.ToBase64String(stream.ToArray()) + "\r\n");
+
+                        attachments.Add(filename);
+
+                        var image = new JObject();
+                        image.Add("url", "attachments://" + filename);
+                        embed.Add("image", image);
+                    } catch {}
+
+                    embeds.Add(embed);
+                }
+                payload.Add("embeds", JToken.FromObject(embeds));
+            }
+            */
+
+            payload.Add("content", message);
+            var json = JsonConvert.SerializeObject(payload);
+       
+            form.Append("--" + boundary + "\r\n");
+            form.Append("Content-Disposition: form-data; name=\"payload_json\"\r\n");
+            form.Append("Content-Type: application/json\r\n\r\n");
+            form.Append(json + "\r\n");
+
+            form.Append("--" + boundary + "--");
+
+            return form.ToString();
+        }
+
         public async Task SendMessage(string channel, string message)
         {
+            var boundary = "--" + DateTime.Now.Ticks;
+
             var url = BASE_ENDPOINT + "/channels/" + channel + "/messages";
 
-            var payload = new JObject();
-            payload.Add("content", message);
+            var payload = ParseMessage(message, boundary);
+
+            mod.Logger.Debug(payload);
 
             var request = WebRequest.CreateHttp(url);
             request.Headers.Add("Authorization", "Bot " + mod.config.token);
             request.Method = "POST";
 
-            var data = Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(payload));
-            request.ContentType = "application/json";
+            var data = Encoding.UTF8.GetBytes(payload);
+            request.ContentType = "multipart/form-data; boundary=" + boundary;
             request.ContentLength = data.Length;
 
             try
